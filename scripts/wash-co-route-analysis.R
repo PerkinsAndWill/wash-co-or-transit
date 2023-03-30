@@ -91,6 +91,7 @@ shapes           <- bus_gtfs$shapes
 routes           <- bus_gtfs$routes %>%
   mutate(route_label = case_when(
     str_length(route_short_name) == 0 ~ route_long_name,
+    #TRUE ~ paste0(route_short_name,": ",route_long_name)
     TRUE ~ paste0(str_pad(route_short_name,width=3,side="left",pad="0"),": ",route_long_name)
   ))
 stops            <- bus_gtfs$stops %>%
@@ -209,7 +210,6 @@ most_freq_stop_times = stop_times %>%
   mutate(headway_observed = (trip_depart_hour-lag(trip_depart_hour))*60) %>%
   ungroup() 
 
-
 # Plot Assembly -------------------------------------------------------------------------
 
 headway_summary <- most_freq_stop_times %>%
@@ -226,56 +226,178 @@ headway_summary <- most_freq_stop_times %>%
   left_join(routes %>% select(route_id,route_type,route_label)) %>%
   mutate(span_depart_hour = max_trip_depart_hour - min_trip_depart_hour) %>%
   mutate(mean_headway_observed = ifelse(mean_headway_observed>60,60,mean_headway_observed),
-         mean_headway_observed = ifelse(is.na(mean_headway_observed),60,mean_headway_observed))
-  #filter(span_depart_hour > mean_headway_observed/60)
+         mean_headway_observed = ifelse(is.na(mean_headway_observed),60,mean_headway_observed)) %>%
+  filter(num_dates_observed >5)
 
-wash_co_route_ref <- read_excel(
-  paste0(get_sharepoint_dir(),
-         "/Wash Co OR Transit Study - Documents/Shared/04 Transit Market/Performance/transit-analysis-worksheet.xlsx"),
-  sheet = "wash_co_route_ref"
+xl_db_path <- paste0(get_sharepoint_dir(),
+                     "/Wash Co OR Transit Study - Documents/Shared/04 Transit Market/Performance/transit-analysis-worksheet.xlsx")
+
+xl_sheets <- excel_sheets(xl_db_path)
+
+wash_co_route_ref <- read_excel(xl_db_path,sheet = "wash_co_route_ref")
+
+uq_day_types <- c("Weekday", "Saturday", "Sunday")
+
+route_level_ref <- read_excel(xl_db_path, sheet = "ft_headways_wkd", skip = 2) %>%
+  clean_names() %>%
+  select(plot_order, route_label) %>% 
+  arrange(desc(plot_order)) %>%
+  mutate(route_label = case_when(
+    str_sub(route_label,1,1) == "0" ~ str_sub(route_label,2,-1),
+    TRUE ~ route_label
+  ))
+
+## Existing Frequency -----------
+
+num_uq_routes <- length(unique(route_level_ref$route_label))
+route_levels = unique(route_level_ref$route_label)
+
+pdf("viz/frequency-span-charts/trimet/frequency-span-by-day-type.pdf",height = 8.5,width = 11,onefile = TRUE)
+for(i in 1:length(uq_day_types)){
+  dc = uq_day_types[[i]]
+  
+  sub_headway_summary <- headway_summary %>%
+    filter(route_id %in% wash_co_route_ref$route_id) %>%
+    filter(day_cat == dc) %>%
+    group_by(route_id) %>%
+    mutate(sum_uq_trip_ids = sum(num_uq_trip_ids)) %>%
+    ungroup() %>%
+    arrange(desc(route_type),sum_uq_trip_ids,route_label) %>%
+    mutate(route_label = case_when(
+      str_sub(route_label,1,1) == "0" ~ str_sub(route_label,2,-1),
+      TRUE ~ route_label
+    )) %>%
+    mutate(route_label = factor(route_label, ordered = TRUE, levels = route_levels))
+  
+  plt <- ggplot(sub_headway_summary, aes(xmin=floor_hour, xmax = floor_hour +1, 
+                                  ymin = as.numeric(route_label)-1,
+                                  ymax = as.numeric(route_label), 
+                                  fill = mean_headway_observed)) +
+    geom_rect()+
+    scale_fill_viridis(option = "F", limits = c(0,60),alpha = 0.8,
+                       name = "Avg.\nHeadway")+
+    theme_light() +
+    scale_x_continuous(breaks = seq(0,26,2),
+                       labels = c("12 am","2 am","4 am","6 am",
+                                  "8 am","10 am","12 pm","2 pm",
+                                  "4 pm","6 pm","8 pm","10 pm",
+                                  "12 am","2 am"),
+                       name = "Hour of Day",
+                       expand = expansion(0))+
+    scale_y_continuous(breaks = seq(0.5,num_uq_routes-0.5),
+                       limits = c(0,num_uq_routes),
+                       labels = route_levels,
+                       expand = expansion(0))+
+    labs(
+      y = "Route",
+      title = "Frequency and Span for Washington County, OR Routes",
+      subtitle = paste0(dc," Service, Fall 2022")
+    )+
+    theme(panel.grid.major.y = element_blank())
+  
+  print(plt)
+}
+dev.off()
+
+## Future Frequency -------------
+
+future_freq_dt_ref <- tribble(
+  ~day_cat, ~sheet_name,
+  "Weekday", "ft_headways_wkd",
+  "Saturday", "ft_headways_sat_sun",
+  "Sunday", "ft_headways_sat_sun"
 )
 
-sub_headway_summary <- headway_summary %>%
-  filter(route_id %in% wash_co_route_ref$route_id) %>%
-  filter(day_cat == "Weekday") %>%
-  group_by(route_id) %>%
-  mutate(sum_uq_trip_ids = sum(num_uq_trip_ids)) %>%
-  ungroup() %>%
-  arrange(desc(route_type),sum_uq_trip_ids,route_label) %>%
-  mutate(route_label = factor(route_label, ordered = TRUE, levels = unique(route_label)))
+pdf("viz/frequency-span-charts/trimet/future-frequency-span-by-day-type.pdf",height = 8.5,width = 11,onefile = TRUE)
+for(i in 1:nrow(future_freq_dt_ref)){
+  
+  sn <- future_freq_dt_ref$sheet_name[i]
+  dc <- future_freq_dt_ref$day_cat[i]
+  
+  if(dc == "Weekday"){
+    raw <- read_excel(xl_db_path, sheet = sn, skip = 2) %>%
+      clean_names()
+    
+    sub_headway_summary <- bind_rows(
+      headway_summary %>%
+        filter(route_id %in% wash_co_route_ref$route_id) %>%
+        filter(route_type !=3, day_cat == dc) %>%
+        select(route_label, floor_hour, mean_headway_observed),
+      raw %>%
+        filter(route_type == 3) %>%
+        select(1:x27_30) %>%
+        pivot_longer(cols = `x4_7`:`x27_30`, names_to = "temp",
+                     values_to = "mean_headway_observed") %>%
+        mutate(floor_hour = str_replace(temp,"x","") %>%
+                 str_extract(".+(?<=_)") %>%
+                 str_replace("_","") %>%
+                 as.numeric()) %>%
+        select(-temp)
+    ) %>%
+      filter(!is.na(mean_headway_observed)) %>%
+      mutate(num_trips = round(60/mean_headway_observed)) %>%
+      group_by(route_label) %>%
+      mutate(daily_trips = sum(num_trips)) %>%
+      ungroup() %>%
+      mutate(route_label = case_when(
+        str_sub(route_label,1,1) == "0" ~ str_sub(route_label,2,-1),
+        TRUE ~ route_label
+      )) %>%
+      mutate(route_label = factor(route_label, ordered = TRUE, levels = route_levels))
+  }else{
+    raw <- read_excel(xl_db_path, sheet = sn, skip = 1) 
+    
+    sub_headway_summary <- bind_rows(
+      headway_summary %>%
+        filter(route_id %in% wash_co_route_ref$route_id) %>%
+        filter(route_type !=3, day_cat == dc) %>%
+        select(route_label, floor_hour, mean_headway_observed),
+      raw %>%
+        filter(route_type == 3) %>%
+        pivot_longer(cols = `4`:`27`, names_to = "floor_hour",
+                     values_to = "mean_headway_observed") %>%
+        mutate(floor_hour = as.numeric(floor_hour))
+    ) %>%
+      filter(!is.na(mean_headway_observed)) %>%
+      mutate(num_trips = round(60/mean_headway_observed)) %>%
+      group_by(route_label) %>%
+      mutate(daily_trips = sum(num_trips)) %>%
+      ungroup() %>%
+      mutate(route_label = factor(route_label, ordered = TRUE, levels = route_levels))
+  }
+  
+  plt <- ggplot(sub_headway_summary, aes(xmin=floor_hour, xmax = floor_hour +1, 
+                                         ymin = as.numeric(route_label)-1,
+                                         ymax = as.numeric(route_label), 
+                                         fill = mean_headway_observed)) +
+    geom_rect()+
+    scale_fill_viridis(option = "F", limits = c(0,60),alpha = 0.8,
+                       name = "Avg.\nHeadway")+
+    theme_light() +
+    scale_x_continuous(breaks = seq(0,26,2),
+                       labels = c("12 am","2 am","4 am","6 am",
+                                  "8 am","10 am","12 pm","2 pm",
+                                  "4 pm","6 pm","8 pm","10 pm",
+                                  "12 am","2 am"),
+                       name = "Hour of Day",
+                       expand = expansion(0))+
+    scale_y_continuous(breaks = seq(0.5,num_uq_routes-0.5),
+                       limits = c(0,num_uq_routes),
+                       labels = route_levels,
+                       expand = expansion(0))+
+    labs(
+      y = "Route",
+      title = "Frequency and Span for Washington County, OR Routes",
+      subtitle = paste0(dc," Service, Forward Together Service Plan")
+    )+
+    theme(panel.grid.major.y = element_blank())
+  
+  print(plt)
+  
+}
+dev.off()
 
-num_uq_routes <- length(unique(sub_headway_summary$route_label))
-route_levels = levels(sub_headway_summary$route_label)
-
-ggplot(sub_headway_summary, aes(xmin=floor_hour, xmax = floor_hour +1, 
-                                ymin = as.numeric(route_label)-1,
-                                ymax = as.numeric(route_label), 
-                                fill = mean_headway_observed)) +
-  geom_rect()+
-  scale_fill_viridis(option = "F", limits = c(0,60),alpha = 0.8,
-                     name = "Avg.\nHeadway")+
-  theme_light() +
-  scale_x_continuous(breaks = seq(0,26,2),
-                     labels = c("12 am","2 am","4 am","6 am",
-                                "8 am","10 am","12 pm","2 pm",
-                                "4 pm","6 pm","8 pm","10 pm",
-                                "12 am","2 am"),
-                     name = "Hour of Day",
-                     expand = expansion(0))+
-  scale_y_continuous(breaks = seq(0.5,num_uq_routes-0.5),
-                     limits = c(0,num_uq_routes),
-                     labels = route_levels,
-                     expand = expansion(0))+
-  labs(
-    y = "Route",
-    title = "Frequency and Span for Washington County, OR Routes",
-    subtitle = "Weekday Service, Fall 2022"
-  )+
-  theme(panel.grid.major.y = element_blank())
-
-ggsave("viz/frequency-span-charts/trimet/frequency-span-weekday.pdf",height = 8.5,width = 11)
-
-# Delay by Route and Hour ------------
+## Delay by Route and Hour ------------
 
 or_counties <- counties(state = "OR", year = 2020)
 wash_county_geom <- or_counties %>%
@@ -311,8 +433,17 @@ rt_hr_delay_summ <- processed_seg_data %>%
   arrange(seg_delay_route) %>%
   mutate(route_label = factor(route_label, ordered=TRUE, levels = unique(route_label)))
 
-num_uq_routes <- length(unique(rt_hr_delay_summ$route_label))
-route_levels = levels(rt_hr_delay_summ$route_label)
+route_levels <- rt_hr_delay_summ %>% 
+  arrange(route_label) %>%
+  distinct(route_label) %>%
+  mutate(route_label = as.character(route_label)) %>%
+  mutate(route_label = case_when(
+    str_sub(route_label,1,1) == "0" ~ str_sub(route_label,2,-1),
+    TRUE ~ route_label
+  )) %>%
+  pull(route_label)
+
+num_uq_routes <- length(route_levels)
 
 #Passenger Delay
 ggplot(rt_hr_delay_summ, aes(xmin=hour, xmax = hour +1, 
@@ -372,4 +503,69 @@ ggplot(rt_hr_delay_summ, aes(xmin=hour, xmax = hour +1,
   theme(panel.grid.major.y = element_blank())
 
 ggsave("viz/frequency-span-charts/trimet/bus-delay-weekday.pdf",height = 8.5,width = 11)
+
+all_day_wash_co_seg_summary <- processed_seg_data %>%
+  filter(segment_id %in% wash_co_segments$segment_id) %>%
+  filter(route_id %in% wash_co_route_ref$route_id) %>%
+  group_by(agency_id,time_period,segment_id) %>%
+  summarise(seg_delay = sum(delay,na.rm = TRUE)/60,
+            pass_delay = sum(pass_delay,na.rm = TRUE)/60,
+            seg_length_miles = mean(seg_length_miles),
+            total_load = sum(total_load,na.rm = TRUE),
+            num_delay_trips = sum(num_delay_trips,na.rm = TRUE),
+            num_load_trips = sum(num_load_trips,na.rm = TRUE)) %>%
+  mutate(pdpm = pass_delay/seg_length_miles,
+         sdpm = seg_delay/seg_length_miles,
+         pdpmpt = 60*(pdpm/num_delay_trips),
+         sdpmpt = 60*(sdpm/num_delay_trips),
+         delay_per_trip = (seg_delay/num_delay_trips)*60,
+         service_miles = num_load_trips*seg_length_miles)
+
+am_peak_wash_co_seg_summary <- processed_seg_data %>%
+  filter(segment_id %in% wash_co_segments$segment_id) %>%
+  filter(route_id %in% wash_co_route_ref$route_id) %>%
+  filter(hour %in% c(7,8)) %>%
+  group_by(agency_id,time_period,segment_id) %>%
+  summarise(seg_delay = sum(delay,na.rm = TRUE)/60,
+            pass_delay = sum(pass_delay,na.rm = TRUE)/60,
+            seg_length_miles = mean(seg_length_miles),
+            total_load = sum(total_load,na.rm = TRUE),
+            num_delay_trips = sum(num_delay_trips,na.rm = TRUE),
+            num_load_trips = sum(num_load_trips,na.rm = TRUE)) %>%
+  mutate(pdpm = pass_delay/seg_length_miles,
+         sdpm = seg_delay/seg_length_miles,
+         pdpmpt = 60*(pdpm/num_delay_trips),
+         sdpmpt = 60*(sdpm/num_delay_trips),
+         delay_per_trip = (seg_delay/num_delay_trips)*60,
+         service_miles = num_load_trips*seg_length_miles)
+
+pm_peak_wash_co_seg_summary <- processed_seg_data %>%
+  filter(segment_id %in% wash_co_segments$segment_id) %>%
+  filter(route_id %in% wash_co_route_ref$route_id) %>%
+  filter(hour %in% c(16,17)) %>%
+  group_by(agency_id,time_period,segment_id) %>%
+  summarise(seg_delay = sum(delay,na.rm = TRUE)/60,
+            pass_delay = sum(pass_delay,na.rm = TRUE)/60,
+            seg_length_miles = mean(seg_length_miles),
+            total_load = sum(total_load,na.rm = TRUE),
+            num_delay_trips = sum(num_delay_trips,na.rm = TRUE),
+            num_load_trips = sum(num_load_trips,na.rm = TRUE)) %>%
+  mutate(pdpm = pass_delay/seg_length_miles,
+         sdpm = seg_delay/seg_length_miles,
+         pdpmpt = 60*(pdpm/num_delay_trips),
+         sdpmpt = 60*(sdpm/num_delay_trips),
+         delay_per_trip = (seg_delay/num_delay_trips)*60,
+         service_miles = num_load_trips*seg_length_miles)
+
+write_sf(wash_co_segments,
+         "G:/Current/WASHINGTON_CO_OR_Transit_Study_2020_1005/Analysis/z_Original/TriMet/wash-co-segment-delay/wash-co-analysis-segments.geojson")
+
+write_csv(all_day_wash_co_seg_summary,
+          "G:/Current/WASHINGTON_CO_OR_Transit_Study_2020_1005/Analysis/z_Original/TriMet/wash-co-segment-delay/all-day-segment-summary.csv")
+
+write_csv(am_peak_wash_co_seg_summary,
+          "G:/Current/WASHINGTON_CO_OR_Transit_Study_2020_1005/Analysis/z_Original/TriMet/wash-co-segment-delay/am-peak-segment-summary.csv")
+
+write_csv(pm_peak_wash_co_seg_summary,
+          "G:/Current/WASHINGTON_CO_OR_Transit_Study_2020_1005/Analysis/z_Original/TriMet/wash-co-segment-delay/pm-peak-segment-summary.csv")
 
