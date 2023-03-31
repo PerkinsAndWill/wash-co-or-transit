@@ -27,6 +27,13 @@ respondent_home_zip_ref <- read_rds("data/output/respondent_home_zip_ref.rds")
 keep_respondent_home_zip_ref <- respondent_home_zip_ref %>%
   filter(home_zip_zone != "Other States")
 
+email_removal_ref <- read_excel(paste0(
+  get_sharepoint_dir(),
+  "/Wash Co OR Transit Study - Documents/Shared/02 Engagement/OOH/wash-co-respondent-emails.xlsx"),
+  sheet= "r-output-emails") %>%
+  clean_names() %>%
+  filter(remove == 1)
+
 #excel_sheets(schema_path)
 col_reference <- read_excel(path = schema_path, sheet = "col_ref")
 questions <- read_excel(path = schema_path, sheet = "questions")
@@ -83,7 +90,8 @@ identified_oc_dups <- open_ended_comment_duplicates %>%
 clean_responses <- clean_responses_pre %>%
   filter(respondent_id %in% filtered_timestamp_duplicates$respondent_id) %>%
   filter(!(respondent_id %in% identified_oc_dups$respondent_id)) %>%
-  filter(respondent_id %in% keep_respondent_home_zip_ref$respondent_id)
+  filter(respondent_id %in% keep_respondent_home_zip_ref$respondent_id) %>%
+  filter(!(respondent_id %in% email_removal_ref$respondent_id))
 
 count_all_responses <- length(unique(raw_responses$x1))
 count_clean_responses <- length(unique(clean_responses$respondent_id))
@@ -220,6 +228,14 @@ for(i in 1:nrow(sub_questions)){
   print(i)
   
 }
+
+# Other text -----------
+other_text_responses <- clean_responses %>%
+  filter(header_level_2 == "Other (please specify)") %>%
+  select(respondent_id,question_id,question_text,header_level_1,header_level_2,
+         answer_text)
+
+clipr::write_clip(other_text_responses)
 
 #Open-Ended Comments ----------
 
