@@ -97,6 +97,27 @@ count_all_responses <- length(unique(raw_responses$x1))
 count_clean_responses <- length(unique(clean_responses$respondent_id))
 percent_kept <- count_clean_responses/count_all_responses
 
+dirty_emails <- raw_responses %>%
+  filter(!(x1 %in% clean_responses$respondent_id)) %>%
+  select(x1, x153) %>%
+  filter(!is.na(x153))
+
+write_csv(dirty_emails,"data/output/invalid-emails-list.csv")
+
+#Extracting Open Ended Responses ----------
+
+open_ended_responses <- clean_responses %>%
+  filter(is.na(answer_id)) %>%
+  filter(answer_text != "NA",
+         answer_text != "No disability") %>%
+  filter(!(question_id %in% c(14, 27, 31, 28, 29, 26))) %>%
+  select(respondent_id, question_id, question_text,
+         header_level_1, header_level_2,
+         answer_text) %>%
+  arrange(question_id,respondent_id)
+
+write_csv(open_ended_responses, "data/output/open-ended-responses.csv")
+
 # Preparing clean responses --------------
 
 transit_rider_ref <- clean_responses %>%

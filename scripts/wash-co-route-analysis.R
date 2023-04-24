@@ -252,11 +252,26 @@ route_level_ref <- read_excel(xl_db_path, sheet = "ft_headways_wkd", skip = 2) %
 num_uq_routes <- length(unique(route_level_ref$route_label))
 route_levels = unique(route_level_ref$route_label)
 
+weekday_headway_summary <- headway_summary %>%
+  filter(route_id %in% wash_co_route_ref$route_id) %>%
+  filter(day_cat == "Weekday") %>%
+  group_by(route_id) %>%
+  mutate(sum_uq_trip_ids = sum(num_uq_trip_ids)) %>%
+  ungroup() %>%
+  arrange(desc(route_type),sum_uq_trip_ids,route_label) %>%
+  mutate(route_label = case_when(
+    str_sub(route_label,1,1) == "0" ~ str_sub(route_label,2,-1),
+    TRUE ~ route_label
+  )) 
+
+sub_route_levels <- route_levels[route_levels %in% weekday_headway_summary$route_label]
+sub_num_uq_routes <- length(sub_route_levels)
+
 pdf("viz/frequency-span-charts/trimet/frequency-span-by-day-type.pdf",height = 8.5,width = 11,onefile = TRUE)
 for(i in 1:length(uq_day_types)){
   dc = uq_day_types[[i]]
   
-  sub_headway_summary <- headway_summary %>%
+  filt_headway_summary <- headway_summary %>%
     filter(route_id %in% wash_co_route_ref$route_id) %>%
     filter(day_cat == dc) %>%
     group_by(route_id) %>%
@@ -266,8 +281,10 @@ for(i in 1:length(uq_day_types)){
     mutate(route_label = case_when(
       str_sub(route_label,1,1) == "0" ~ str_sub(route_label,2,-1),
       TRUE ~ route_label
-    )) %>%
-    mutate(route_label = factor(route_label, ordered = TRUE, levels = route_levels))
+    )) 
+  
+  sub_headway_summary <-  filt_headway_summary %>%
+    mutate(route_label = factor(route_label, ordered = TRUE, levels = sub_route_levels))
   
   plt <- ggplot(sub_headway_summary, aes(xmin=floor_hour, xmax = floor_hour +1, 
                                   ymin = as.numeric(route_label)-1,
@@ -284,9 +301,9 @@ for(i in 1:length(uq_day_types)){
                                   "12 am","2 am"),
                        name = "Hour of Day",
                        expand = expansion(0))+
-    scale_y_continuous(breaks = seq(0.5,num_uq_routes-0.5),
-                       limits = c(0,num_uq_routes),
-                       labels = route_levels,
+    scale_y_continuous(breaks = seq(0.5,sub_num_uq_routes-0.5),
+                       limits = c(0,sub_num_uq_routes),
+                       labels = sub_route_levels,
                        expand = expansion(0))+
     labs(
       y = "Route",
@@ -363,14 +380,42 @@ for(i in 1:nrow(future_freq_dt_ref)){
       group_by(route_label) %>%
       mutate(daily_trips = sum(num_trips)) %>%
       ungroup() %>%
+      mutate(route_label = case_when(
+        str_sub(route_label,1,1) == "0" ~ str_sub(route_label,2,-1),
+        TRUE ~ route_label
+      )) %>%
       mutate(route_label = factor(route_label, ordered = TRUE, levels = route_levels))
   }
   
-  plt <- ggplot(sub_headway_summary, aes(xmin=floor_hour, xmax = floor_hour +1, 
-                                         ymin = as.numeric(route_label)-1,
-                                         ymax = as.numeric(route_label), 
-                                         fill = mean_headway_observed)) +
-    geom_rect()+
+  missing_route_labels <- route_levels[!(route_levels %in% sub_headway_summary$route_label)]
+  
+  missing_route_frame <-expand_grid(
+    route_label = missing_route_labels,
+    floor_hour = 3:27
+  ) %>%
+    filter(!(route_label %in% c("WES Commuter Rail"))) %>%
+    mutate(route_label = factor(route_label, ordered = TRUE, levels = route_levels)) 
+  
+  # pf_headway_summary <- sub_headway_summary %>%
+  #   select(floor_hour,route_label,mean_headway_observed) %>%
+  #   full_join(
+  #     expand_grid(
+  #       route_label = route_levels,
+  #       floor_hour = 3:26
+  #     ) %>%
+  #       mutate(route_label = factor(route_label, ordered = TRUE, levels = route_levels))
+  #   ) %>%
+  #   arrange(route_label,floor_hour)
+  
+  plt <- ggplot() +
+    geom_rect(data = sub_headway_summary, aes(xmin=floor_hour, xmax = floor_hour +1, 
+                                              ymin = as.numeric(route_label)-1,
+                                              ymax = as.numeric(route_label), 
+                                              fill = mean_headway_observed))+
+    geom_line(data = missing_route_frame, aes(x = floor_hour, y = as.numeric(route_label)-0.5, group =route_label,
+                                              color="Discontinued Routes"),
+              size=3) +
+    scale_color_manual(values = c("dark grey"),name="") +
     scale_fill_viridis(option = "F", limits = c(0,60),alpha = 0.8,
                        name = "Avg.\nHeadway")+
     theme_light() +
@@ -396,6 +441,130 @@ for(i in 1:nrow(future_freq_dt_ref)){
   
 }
 dev.off()
+
+## change in number of daily trips ---------
+
+dt_list = list()
+
+for(i in 1:nrow(future_freq_dt_ref)){
+  
+  sn <- future_freq_dt_ref$sheet_name[i]
+  dc <- future_freq_dt_ref$day_cat[i]
+  
+  if(dc == "Weekday"){
+    raw <- read_excel(xl_db_path, sheet = sn, skip = 2) %>%
+      clean_names()
+    
+    ft_headway_summary <- bind_rows(
+      headway_summary %>%
+        filter(route_id %in% wash_co_route_ref$route_id) %>%
+        filter(route_type !=3, day_cat == dc) %>%
+        select(route_label, floor_hour, mean_headway_observed),
+      raw %>%
+        filter(route_type == 3) %>%
+        select(1:x27_30) %>%
+        pivot_longer(cols = `x4_7`:`x27_30`, names_to = "temp",
+                     values_to = "mean_headway_observed") %>%
+        mutate(floor_hour = str_replace(temp,"x","") %>%
+                 str_extract(".+(?<=_)") %>%
+                 str_replace("_","") %>%
+                 as.numeric()) %>%
+        select(-temp)
+    ) %>%
+      filter(!is.na(mean_headway_observed)) %>%
+      mutate(num_trips = round(60/mean_headway_observed)) %>%
+      group_by(route_label) %>%
+      mutate(daily_trips = sum(num_trips)) %>%
+      ungroup() %>%
+      mutate(route_label = case_when(
+        str_sub(route_label,1,1) == "0" ~ str_sub(route_label,2,-1),
+        TRUE ~ route_label
+      )) %>%
+      mutate(route_label = factor(route_label, ordered = TRUE, levels = route_levels))
+  }else{
+    raw <- read_excel(xl_db_path, sheet = sn, skip = 1) 
+    
+    ft_headway_summary <- bind_rows(
+      headway_summary %>%
+        filter(route_id %in% wash_co_route_ref$route_id) %>%
+        filter(route_type !=3, day_cat == dc) %>%
+        select(route_label, floor_hour, mean_headway_observed),
+      raw %>%
+        filter(route_type == 3) %>%
+        pivot_longer(cols = `4`:`27`, names_to = "floor_hour",
+                     values_to = "mean_headway_observed") %>%
+        mutate(floor_hour = as.numeric(floor_hour))
+    ) %>%
+      filter(!is.na(mean_headway_observed)) %>%
+      mutate(num_trips = round(60/mean_headway_observed)) %>%
+      group_by(route_label) %>%
+      mutate(daily_trips = sum(num_trips)) %>%
+      ungroup() %>%
+      mutate(route_label = case_when(
+        str_sub(route_label,1,1) == "0" ~ str_sub(route_label,2,-1),
+        TRUE ~ route_label
+      )) %>%
+      mutate(route_label = factor(route_label, ordered = TRUE, levels = route_levels))
+  }
+  
+  ex_headway_summary <- headway_summary %>%
+    filter(route_id %in% wash_co_route_ref$route_id) %>%
+    filter(day_cat == dc) %>%
+    group_by(route_id) %>%
+    mutate(sum_uq_trip_ids = sum(num_uq_trip_ids)) %>%
+    ungroup() %>%
+    arrange(desc(route_type),sum_uq_trip_ids,route_label) %>%
+    mutate(route_label = case_when(
+      str_sub(route_label,1,1) == "0" ~ str_sub(route_label,2,-1),
+      TRUE ~ route_label
+    )) 
+  
+  ft_daily_trips <- ft_headway_summary %>%
+    group_by(route_label) %>%
+    summarise(daily_trips = mean(daily_trips)) %>%
+    ungroup() %>%
+    mutate(day_cat = dc)
+  
+  ex_daily_trips <- ex_headway_summary %>%
+    mutate(num_trips = 60/mean_headway_observed) %>%
+    group_by(route_label) %>%
+    summarise(daily_trips = sum(num_trips) %>% round(0)) %>%
+    ungroup() %>%
+    mutate(day_cat = dc)
+  
+  joined_daily_trips = ex_daily_trips %>%
+    rename(ex_daily_trips = daily_trips) %>%
+    full_join(ft_daily_trips %>%
+                rename(ft_daily_trips = daily_trips)) %>%
+    mutate(across(.cols = c(ex_daily_trips,ft_daily_trips),
+                  replace_na, 0)) %>%
+    mutate(diff_daily_trips = ft_daily_trips - ex_daily_trips)
+  
+  dt_list[[i]] = joined_daily_trips
+  
+  print(i)
+}
+
+dt_bound <- bind_rows(dt_list) %>%
+  group_by(route_label) %>%
+  mutate(weekday_diff = diff_daily_trips[day_cat=="Weekday"]) %>%
+  ungroup() %>%
+  arrange(weekday_diff) %>%
+  mutate(route_label = factor(route_label, ordered=TRUE, levels = unique(route_label))) %>%
+  mutate(day_cat = factor(day_cat,ordered=TRUE,levels=c("Weekday","Saturday","Sunday")))
+
+ggplot(dt_bound,aes(x=diff_daily_trips,y=route_label))+
+  geom_col(fill = nn_colors("NN Blue"), alpha=0.9) + facet_wrap(~day_cat) +
+  nn_basic_theme(grey_background = FALSE) +
+  scale_x_continuous(limits = c(-60,60), breaks = seq(-60,60,20)) +
+  theme(panel.grid.major.x = element_line(colour = "#002934", linewidth = 0.1))+
+  labs(
+    x = "Difference in Daily Trips Scheduled",
+    y = "Route",
+    title = str_wrap("Difference in Daily Trips Scheduled for Forward Together Service Plan Relative to Fall 2022 Service",width=100)
+  )
+ggsave("viz/frequency-span-charts/trimet/diff-daily-trips-scheduled.pdf",height = 8.5,width = 11)
+
 
 ## Delay by Route and Hour ------------
 
@@ -430,7 +599,7 @@ rt_hr_delay_summ <- processed_seg_data %>%
   mutate(pass_delay_route = sum(pass_delay),
          seg_delay_route = sum(seg_delay)) %>%
   ungroup() %>%
-  arrange(seg_delay_route) %>%
+  arrange(desc(route_id)) %>%
   mutate(route_label = factor(route_label, ordered=TRUE, levels = unique(route_label)))
 
 route_levels <- rt_hr_delay_summ %>% 
