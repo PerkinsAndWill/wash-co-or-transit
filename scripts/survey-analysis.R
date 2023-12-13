@@ -417,7 +417,7 @@ clipr::write_clip(respondent_emails)
 
 ## Plot function -------
 
-crosstab_function <- function(demog_ref, compare_qid, plot_title){
+crosstab_function <- function(demog_ref, compare_qid, plot_title, file_suffix = ""){
   
   answer_wrap_width = 60
   
@@ -469,7 +469,13 @@ crosstab_function <- function(demog_ref, compare_qid, plot_title){
       str_wrap(width = answer_wrap_width) %>%
       unique()
   }else{
-    ordered_answers <- sub_responses %>%
+    ordered_answers <- clean_responses %>%
+      filter(question_id == compare_qid) %>%
+      filter(other_text == FALSE | is.na(other_text)) %>%
+      mutate(answer_text = case_when(
+        is.na(other_text) ~ header_level_2,
+        TRUE ~ answer_text
+      )) %>%
       group_by(answer_text) %>%
       summarise(num_responses = n()) %>%
       arrange(num_responses) %>%
@@ -527,7 +533,9 @@ crosstab_function <- function(demog_ref, compare_qid, plot_title){
   
   ggsave(paste0("viz/survey-analysis/crosstabs/q",
                 str_pad(compare_qid,width = 2,side = "left",pad = "0"),"_vs_",
-                str_pad(demo_qid,width = 2,side = "left",pad = "0"),".png"),
+                str_pad(demo_qid,width = 2,side = "left",pad = "0"),
+                file_suffix,
+                ".png"),
          width = 6,
          height = 2 + num_answers*0.25,
          dpi = 300,
@@ -649,3 +657,11 @@ crosstab_function(demog_ref, compare_qid = 8, plot_title = "Transit Barriers (fo
 crosstab_function(demog_ref, compare_qid = 9, "Potential Transit Improvements (for riders) by Home Location")
 crosstab_function(demog_ref, compare_qid = 11, "Transit Barriers (for non-riders) by Home Location")
 crosstab_function(demog_ref, compare_qid = 12, "Potential Transit Improvements (for non-riders) by Home Location")
+
+crosstab_function(demog_ref %>% filter(demo_group %in% c("Beaverton/Hillsboro","South County","Cornelius/Forest Grove")), 
+                  compare_qid = 8, plot_title = "Transit Barriers (for riders) by Home Location",
+                  file_suffix = "_sub_1")
+
+crosstab_function(demog_ref %>% filter(demo_group %in% c("Other Portland Metro Area","Other OR and WA","Rural County")), 
+                  compare_qid = 8, plot_title = "Transit Barriers (for riders) by Home Location",
+                  file_suffix = "_sub_2")
